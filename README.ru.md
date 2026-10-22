@@ -8,19 +8,21 @@
 **<https://github.com/dronov-dmitry/nemo>**. Этот репозиторий содержит только
 скрипты и файлы патчей — исходники Nemo здесь не дублируются.
 
+Video: [https://youtu.be/_4FF53jmb7s](https://youtu.be/_4FF53jmb7s)
+
 [English](README.md) · Русский
 
 ## Содержимое
 
-| Путь | Назначение |
-| --- | --- |
-| `nemo-update.sh` | Основной скрипт: синхронизация форка и апстрима, накат патча, сборка, установка, перезапуск Nemo |
-| `build_and_install.sh` | Сборка и установка из уже подготовленной локальной копии исходников |
-| `git-download.sh` | Интерактивное shallow-скачивание всего репозитория или одной папки |
-| `opencode-session.sh` | Запуск `opencode` в развёрнутом терминале с предложением перезапустить Nemo после выхода |
-| `patches/` | Готовые `.patch`-файлы (для `git am` или ревью в PR) |
-| `docs/PR_PROMPT.md` | Разбор одного из предложенных фиксов (анализ причины + исправление) |
-| `examples/run_install.example.txt` | Пример команды установки локально собранных `.deb` |
+| Путь                               | Назначение                                                                                       |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `nemo-update.sh`                   | Основной скрипт: синхронизация форка и апстрима, накат патча, сборка, установка, перезапуск Nemo |
+| `build_and_install.sh`             | Сборка и установка из уже подготовленной локальной копии исходников                              |
+| `git-download.sh`                  | Интерактивное shallow-скачивание всего репозитория или одной папки                               |
+| `opencode-session.sh`              | Запуск `opencode` в развёрнутом терминале с предложением перезапустить Nemo после выхода         |
+| `patches/`                         | Готовые `.patch`-файлы (для `git am` или ревью в PR)                                             |
+| `docs/PR_PROMPT.md`                | Разбор одного из предложенных фиксов (анализ причины + исправление)                              |
+| `examples/run_install.example.txt` | Пример команды установки локально собранных `.deb`                                               |
 
 ## Требования
 
@@ -51,16 +53,16 @@ export NEMO_BRANCH=dnd-keep-drop-target-visible
 
 ## Переменные окружения
 
-| Переменная | По умолчанию | Где используется | Назначение |
-| --- | --- | --- | --- |
-| `NEMO_FORK` | `https://github.com/dronov-dmitry/nemo.git` | все | Ваш форк |
-| `NEMO_BRANCH` | `dnd-keep-drop-target-visible` | `nemo-update.sh` | Ветка с патчем |
-| `NEMO_UPSTREAM` | `https://github.com/linuxmint/nemo.git` | `nemo-update.sh` | Репозиторий апстрима |
-| `NEMO_SRC` | `~/nemo-patched-src` (в `build_and_install.sh` — `~/nemo-src`) | оба | Песочница для исходников |
-| `NEMO_LOCAL_SRC` | `~/nemo-build` | `build_and_install.sh` | Локальная копия, из которой идёт сборка |
-| `NEMO_FEATURE_SYMBOL` | `nemo_window_dnd_source_press` | оба | Символ, доказывающий, что патч установлен |
-| `NEMO_INSTALLED` | `/usr/bin/nemo` | `nemo-update.sh` | Проверяемый бинарник |
-| `NEMO_RAW` | raw `meson.build` от linuxmint/nemo | `nemo-update.sh` | Откуда читать версию апстрима |
+| Переменная            | По умолчанию                                                   | Где используется       | Назначение                                |
+| --------------------- | -------------------------------------------------------------- | ---------------------- | ----------------------------------------- |
+| `NEMO_FORK`           | `https://github.com/dronov-dmitry/nemo.git`                    | все                    | Ваш форк                                  |
+| `NEMO_BRANCH`         | `dnd-keep-drop-target-visible`                                 | `nemo-update.sh`       | Ветка с патчем                            |
+| `NEMO_UPSTREAM`       | `https://github.com/linuxmint/nemo.git`                        | `nemo-update.sh`       | Репозиторий апстрима                      |
+| `NEMO_SRC`            | `~/nemo-patched-src` (в `build_and_install.sh` — `~/nemo-src`) | оба                    | Песочница для исходников                  |
+| `NEMO_LOCAL_SRC`      | `~/nemo-build`                                                 | `build_and_install.sh` | Локальная копия, из которой идёт сборка   |
+| `NEMO_FEATURE_SYMBOL` | `nemo_window_dnd_source_press`                                 | оба                    | Символ, доказывающий, что патч установлен |
+| `NEMO_INSTALLED`      | `/usr/bin/nemo`                                                | `nemo-update.sh`       | Проверяемый бинарник                      |
+| `NEMO_RAW`            | raw `meson.build` от linuxmint/nemo                            | `nemo-update.sh`       | Откуда читать версию апстрима             |
 
 `build_and_install.sh` собирает строго из `NEMO_LOCAL_SRC` (по умолчанию на
 системном диске), синхронизируя его из `NEMO_SRC` при первом запуске. Так

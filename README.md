@@ -8,19 +8,21 @@ The patches themselves live in a separate fork:
 **<https://github.com/dronov-dmitry/nemo>**. This repository only carries the
 scripts and patch files — it does not duplicate the Nemo sources.
 
+Video: [https://youtu.be/_4FF53jmb7s](https://youtu.be/_4FF53jmb7s)
+
 English · [Русский](README.ru.md)
 
 ## Contents
 
-| Path | Purpose |
-| --- | --- |
-| `nemo-update.sh` | Main script: sync fork + upstream, apply the patch, build, install, restart Nemo |
-| `build_and_install.sh` | Build + install from an already prepared local copy of the sources |
-| `git-download.sh` | Interactive shallow clone of a whole repo or a single folder |
-| `opencode-session.sh` | Open `opencode` in a maximized terminal, offer a Nemo restart afterwards |
-| `patches/` | Ready-made `.patch` files (for `git am` or for review in a PR) |
-| `docs/PR_PROMPT.md` | Write-up of one of the proposed fixes (root-cause analysis + fix) |
-| `examples/run_install.example.txt` | Example command for installing locally built `.deb` packages |
+| Path                               | Purpose                                                                          |
+| ---------------------------------- | -------------------------------------------------------------------------------- |
+| `nemo-update.sh`                   | Main script: sync fork + upstream, apply the patch, build, install, restart Nemo |
+| `build_and_install.sh`             | Build + install from an already prepared local copy of the sources               |
+| `git-download.sh`                  | Interactive shallow clone of a whole repo or a single folder                     |
+| `opencode-session.sh`              | Open `opencode` in a maximized terminal, offer a Nemo restart afterwards         |
+| `patches/`                         | Ready-made `.patch` files (for `git am` or for review in a PR)                   |
+| `docs/PR_PROMPT.md`                | Write-up of one of the proposed fixes (root-cause analysis + fix)                |
+| `examples/run_install.example.txt` | Example command for installing locally built `.deb` packages                     |
 
 ## Requirements
 
@@ -51,16 +53,16 @@ latest upstream master.
 
 ## Environment variables
 
-| Variable | Default | Used by | Meaning |
-| --- | --- | --- | --- |
-| `NEMO_FORK` | `https://github.com/dronov-dmitry/nemo.git` | all | Your fork |
-| `NEMO_BRANCH` | `dnd-keep-drop-target-visible` | `nemo-update.sh` | Branch carrying the patch |
-| `NEMO_UPSTREAM` | `https://github.com/linuxmint/nemo.git` | `nemo-update.sh` | Upstream repo |
-| `NEMO_SRC` | `~/nemo-patched-src` (`~/nemo-src` in `build_and_install.sh`) | both | Sources sandbox |
-| `NEMO_LOCAL_SRC` | `~/nemo-build` | `build_and_install.sh` | Local copy actually built from |
-| `NEMO_FEATURE_SYMBOL` | `nemo_window_dnd_source_press` | both | Symbol used to prove the patch is installed |
-| `NEMO_INSTALLED` | `/usr/bin/nemo` | `nemo-update.sh` | Binary to check |
-| `NEMO_RAW` | raw `meson.build` of linuxmint/nemo | `nemo-update.sh` | Where to read the upstream version from |
+| Variable              | Default                                                       | Used by                | Meaning                                     |
+| --------------------- | ------------------------------------------------------------- | ---------------------- | ------------------------------------------- |
+| `NEMO_FORK`           | `https://github.com/dronov-dmitry/nemo.git`                   | all                    | Your fork                                   |
+| `NEMO_BRANCH`         | `dnd-keep-drop-target-visible`                                | `nemo-update.sh`       | Branch carrying the patch                   |
+| `NEMO_UPSTREAM`       | `https://github.com/linuxmint/nemo.git`                       | `nemo-update.sh`       | Upstream repo                               |
+| `NEMO_SRC`            | `~/nemo-patched-src` (`~/nemo-src` in `build_and_install.sh`) | both                   | Sources sandbox                             |
+| `NEMO_LOCAL_SRC`      | `~/nemo-build`                                                | `build_and_install.sh` | Local copy actually built from              |
+| `NEMO_FEATURE_SYMBOL` | `nemo_window_dnd_source_press`                                | both                   | Symbol used to prove the patch is installed |
+| `NEMO_INSTALLED`      | `/usr/bin/nemo`                                               | `nemo-update.sh`       | Binary to check                             |
+| `NEMO_RAW`            | raw `meson.build` of linuxmint/nemo                           | `nemo-update.sh`       | Where to read the upstream version from     |
 
 `build_and_install.sh` builds strictly from `NEMO_LOCAL_SRC` (by default on the
 system disk), syncing it from `NEMO_SRC` on the first run. This avoids building

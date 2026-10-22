@@ -4,7 +4,9 @@
 #                  and if not — updates it to the latest linuxmint/nemo,
 #                  applies the patch from your fork (the Nemo window no
 #                  longer covers the drag target, the terminal no longer
-#                  pops on top when a drag starts) and installs it.
+#                  pops on top when a drag starts), CARRIES OVER the locally
+#                  built functionality (uncommitted changes in the local
+#                  build copy, e.g. ~/nemo-build) and installs it.
 #
 # Run without flags — interactive: the script detects the state and offers
 # choices. Flags are kept for automation (they never ask questions).
@@ -20,6 +22,13 @@
 #
 # Environment variables:
 #   NEMO_SRC       sandbox directory for the sources (default: ~/nemo-patched-src)
+#   NEMO_LOCAL_SRC local build copy (default: ~/nemo-build). Its uncommitted
+#                  changes are treated as "local functionality": they are
+#                  applied on top of the new version and committed, so an
+#                  update never drops them. After a successful install the
+#                  copy is synced with the merged tree.
+#   NEMO_LOCAL_PATCH where to save the extracted local changes
+#                  (default: ~/nemo-local-features.patch)
 #   NEMO_FORK      URL of your fork
 #   NEMO_BRANCH    branch with the patch
 #   NEMO_UPSTREAM  URL of the upstream repository
@@ -36,6 +45,9 @@ SRC=${NEMO_SRC:-$HOME/nemo-patched-src}
 BUILD="$SRC/builddir"
 FEATURE_SYMBOL=${NEMO_FEATURE_SYMBOL:-nemo_window_dnd_source_press}
 INSTALLED_BIN=${NEMO_INSTALLED:-/usr/bin/nemo}
+LOCAL_SRC=${NEMO_LOCAL_SRC:-$HOME/nemo-build}
+LOCAL_PATCH_FILE=${NEMO_LOCAL_PATCH:-$HOME/nemo-local-features.patch}
+LOCAL_CARRIED=no
 
 MODE=interactive
 for arg in "$@"; do
@@ -44,7 +56,7 @@ for arg in "$@"; do
         --yes|-y)     MODE=install ;;
         --no-install) MODE=build ;;
         --restart)    MODE=install_restart ;;
-        -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help)    awk 'NR>1 && /^set -euo/{exit} NR>1{print}' "$0"; exit 0 ;;
         *) echo "unknown argument: $arg (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -248,6 +260,58 @@ git -C "$SRC" grep -q "$FEATURE_SYMBOL" -- 'src/*.c' || {
 echo "==> Patch applied ($FEATURE_SYMBOL found)"
 
 # ---------------------------------------------------------------------------
+# 2b. Carry over the locally built functionality
+# ---------------------------------------------------------------------------
+# The local build copy (the one build_and_install.sh builds from) may hold
+# extra functionality that exists nowhere else yet: uncommitted changes in
+# its working tree. They are extracted as a patch and applied on top of the
+# build branch, so an update never silently drops them.
+if [ "$LOCAL_SRC" = "$SRC" ] || [ ! -d "$LOCAL_SRC/.git" ]; then
+    echo "==> No separate local build copy ($LOCAL_SRC) — nothing to carry over"
+elif [ -n "$(git -C "$LOCAL_SRC" status --porcelain 2>/dev/null)" ]; then
+    echo "==> Local functionality found in $LOCAL_SRC:"
+    # intent-to-add: brand-new untracked files are included in the diff
+    git -C "$LOCAL_SRC" add -N . 2>/dev/null || true
+    git -C "$LOCAL_SRC" diff HEAD --stat | sed 's/^/      /'
+    git -C "$LOCAL_SRC" diff HEAD > "$LOCAL_PATCH_FILE"
+
+    if [ -s "$LOCAL_PATCH_FILE" ]; then
+        echo "==> Applying the local functionality on top of the new version..."
+        if ! git -C "$SRC" apply --3way "$LOCAL_PATCH_FILE"; then
+            cat >&2 <<EOF
+
+!! The local changes from $LOCAL_SRC conflict with the new Nemo version.
+
+   The patch is saved to: $LOCAL_PATCH_FILE
+   Nothing is lost: the changes are still uncommitted in $LOCAL_SRC.
+
+   Option 1 — resolve the conflict and keep the functionality:
+       cd $SRC
+       # fix the files with conflict markers, then:
+       git add <files> && git commit
+       cd $LOCAL_SRC && git reset --hard    # the changes are consumed
+
+   Option 2 — drop the local changes and continue without them:
+       cd $SRC && git reset --hard
+       cd $LOCAL_SRC && git checkout -- . && git clean -fd
+
+   Then rerun this script.
+EOF
+            exit 1
+        fi
+        # git apply --3way stages the merged files; add the rest explicitly
+        while IFS= read -r f; do
+            [ -n "$f" ] && git -C "$SRC" add -- "$f"
+        done < <(git -C "$LOCAL_SRC" diff HEAD --name-only)
+        git -C "$SRC" commit -q -m "local: carry over the functionality from $LOCAL_SRC"
+        LOCAL_CARRIED=yes
+        echo "==> Local functionality applied and committed"
+    fi
+else
+    echo "==> No uncommitted local changes in $LOCAL_SRC — nothing to carry over"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Dependencies (must not break the build because of third-party PPAs)
 # ---------------------------------------------------------------------------
 echo "==> Checking and installing build dependencies..."
@@ -302,12 +366,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Summary and restart
+# 6. Sync the merged tree into the local build copy
+# ---------------------------------------------------------------------------
+# build_and_install.sh builds from LOCAL_SRC; bring it to the same state, so
+# a later rebuild keeps both the new Nemo version and the local functionality.
+if [ "$LOCAL_SRC" != "$SRC" ] && [ -d "$LOCAL_SRC/.git" ]; then
+    echo "==> Syncing the merged tree into the local build copy: $LOCAL_SRC"
+    git -C "$LOCAL_SRC" remote set-url merged "$SRC" 2>/dev/null \
+        || git -C "$LOCAL_SRC" remote add merged "$SRC"
+    git -C "$LOCAL_SRC" fetch -q merged build
+    # The local changes were consumed above (section 2b) — safe to reset.
+    git -C "$LOCAL_SRC" reset --hard -q
+    git -C "$LOCAL_SRC" checkout -q -B build FETCH_HEAD
+    mkdir -p "$LOCAL_SRC/.git/info"
+    grep -qxF 'builddir/' "$LOCAL_SRC/.git/info/exclude" 2>/dev/null \
+        || echo 'builddir/' >> "$LOCAL_SRC/.git/info/exclude"
+    echo "    done: build @ $(git -C "$LOCAL_SRC" rev-parse --short HEAD)"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Summary and restart
 # ---------------------------------------------------------------------------
 echo
 echo "==> Done."
 echo "    Upstream : nemo $UP_VER @ $UP_SHA"
 echo "    Patch    : $BRANCH ($( [ -n "$COMMITS" ] && printf '%s\n' "$COMMITS" | wc -l ) commit(s))"
+echo "    Local    : $( [ "$LOCAL_CARRIED" = yes ] && echo "functionality from $LOCAL_SRC carried over" || echo "no local changes to carry over" )"
 
 DO_RESTART=0
 if [ "$MODE" = "install_restart" ]; then

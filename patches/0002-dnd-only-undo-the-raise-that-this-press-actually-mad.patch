@@ -1,0 +1,159 @@
+From edeee402de6103bc41ac94ed59fd8c5696583578 Mon Sep 17 00:00:00 2001
+From: dronov-dmitry <dronov-dmitry@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 18:46:56 +0200
+Subject: [PATCH 2/2] dnd: only undo the raise that this press actually made
+
+The window was restored to the position remembered when the pointer
+last arrived at it, so a press that did not raise anything - because
+the window was already in front - still pushed it back under a window
+that happened to be recorded as being above it earlier.  That window
+then jumped to the front as soon as the drag started, even though it
+had been in the background the whole time.
+
+Whether the press raised the window is now taken from the focus change
+instead: focus arriving while a button is down can only mean the window
+manager raised and focused us because of that click, and it is
+delivered before the button press itself.  The flag is cleared whenever
+the interaction is over (button release, drag end), when focus is lost,
+and when the pointer arrives with no button down, so it cannot survive
+into the next press.
+
+The window stacked above us is likewise only remembered while nobody
+is pressing on us: the EnterNotify that follows the raise happens once
+we are already on top, and recording the window above us then would
+record "nothing" and lose where we really were.
+---
+ src/nemo-window.c | 73 ++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 57 insertions(+), 16 deletions(-)
+
+diff --git a/src/nemo-window.c b/src/nemo-window.c
+index 6856a0f..bb6a57f 100644
+--- a/src/nemo-window.c
++++ b/src/nemo-window.c
+@@ -1117,18 +1117,17 @@ nemo_window_enter_notify_event (GtkWidget *widget,
+ {
+ 	NemoWindow *window = NEMO_WINDOW (widget);
+ 
+-	/* Work out whether a click on this window would raise it: it will if
+-	 * the window does not have the toplevel focus.
++	/* Remember where this window sits - that is the position a press may
++	 * have to restore - and clear the "the press raised us" flag: nobody
++	 * is pressing on us right now, and whether the next press raises this
++	 * window is decided in nemo_window_focus_in_event(), which runs before
++	 * the button press is delivered.
+ 	 *
+-	 * Two kinds of crossing event have to be ignored, because neither is
+-	 * the pointer simply arriving:
+-	 *
+-	 *  - events delivered while a grab is active (a drag in progress);
+-	 *  - events generated while a button is held.  Clicking an unfocused
+-	 *    window makes the window manager raise and focus it, and that
+-	 *    restack in turn produces another EnterNotify - already with the
+-	 *    focus - which would otherwise wipe out the answer we just
+-	 *    recorded and stop the window from stepping aside at all.
++	 * Crossing events generated while a button is held are ignored:
++	 * clicking an unfocused window makes the window manager raise and
++	 * focus it, and that restack produces another EnterNotify - by then we
++	 * are already on top, so recording the window above us there would
++	 * record "nothing" and lose where we really were.
+ 	 */
+ 	if (event->mode != GDK_CROSSING_NORMAL)
+ 		return GDK_EVENT_PROPAGATE;
+@@ -1136,11 +1135,45 @@ nemo_window_enter_notify_event (GtkWidget *widget,
+ 	if (event->state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK))
+ 		return GDK_EVENT_PROPAGATE;
+ 
+-	window->details->dnd_raised_by_click =
+-		!gtk_window_has_toplevel_focus (GTK_WINDOW (window));
++	window->details->dnd_raised_by_click = FALSE;
++	nemo_window_record_stack_sibling (window);
++
++	return GDK_EVENT_PROPAGATE;
++}
+ 
+-	if (window->details->dnd_raised_by_click)
+-		nemo_window_record_stack_sibling (window);
++/**
++ * Focus arriving while a button is down can only mean that a press on an
++ * unfocused window made the window manager raise and focus it - that is
++ * exactly the raise a drag has to undo.  Focus taken any other way (window
++ * activation, a dialog, ...) means this window is legitimately on top.
++ *
++ * This is delivered before the button press itself, so
++ * nemo_window_dnd_source_press() can rely on it.
++ */
++static gboolean
++nemo_window_focus_in_event (GtkWidget *widget,
++			    GdkEventFocus *event)
++{
++	NemoWindow *window = NEMO_WINDOW (widget);
++	guint mask = 0;
++	gboolean held = FALSE;
++
++#ifdef GDK_WINDOWING_X11
++	{
++		GdkDisplay *display = gtk_widget_get_display (widget);
++
++		if (GDK_IS_X11_DISPLAY (display)) {
++			Display *xdpy = GDK_DISPLAY_XDISPLAY (display);
++			Window r, child;
++			int rx, ry, wx, wy;
++
++			if (XQueryPointer (xdpy, DefaultRootWindow (xdpy), &r, &child,
++					   &rx, &ry, &wx, &wy, &mask))
++				held = (mask & (Button1Mask | Button2Mask | Button3Mask)) != 0;
++		}
++	}
++#endif
++	window->details->dnd_raised_by_click = held;
+ 
+ 	return GDK_EVENT_PROPAGATE;
+ }
+@@ -1154,7 +1187,7 @@ nemo_window_focus_out_event (GtkWidget *widget,
+ 	/* Focus went somewhere else, so the next click on this window is
+ 	 * intercepted by the window manager and raises it.
+ 	 */
+-	window->details->dnd_raised_by_click = TRUE;
++	window->details->dnd_raised_by_click = FALSE;
+ 	nemo_window_record_stack_sibling (window);
+ 
+ 	return GDK_EVENT_PROPAGATE;
+@@ -1330,6 +1363,7 @@ nemo_window_dnd_source_press (NemoWindow *window)
+ 
+     window->details->dnd_drag_started = FALSE;
+     window->details->dnd_stepped_aside = FALSE;
++
+     if (nemo_window_is_desktop (window))
+         return;
+ 
+@@ -1382,6 +1416,10 @@ nemo_window_dnd_source_release (NemoWindow *window)
+ 
+     g_return_if_fail (NEMO_IS_WINDOW (window));
+ 
++    /* Whatever the press did is over; the next one decides for itself
++     * whether it raises this window.
++     */
++    window->details->dnd_raised_by_click = FALSE;
+     if (!window->details->dnd_stepped_aside)
+         return;
+ 
+@@ -1428,6 +1466,7 @@ nemo_window_dnd_source_end (NemoWindow *window)
+ 
+ 	g_return_if_fail (NEMO_IS_WINDOW (window));
+ 
++	window->details->dnd_raised_by_click = FALSE;
+ 	if (!window->details->dnd_stepped_aside)
+ 		return;
+ 
+@@ -2557,6 +2596,8 @@ nemo_window_init (NemoWindow *window)
+ 	 */
+ 	g_signal_connect (window, "enter-notify-event",
+ 			  G_CALLBACK (nemo_window_enter_notify_event), NULL);
++	g_signal_connect (window, "focus-in-event",
++			  G_CALLBACK (nemo_window_focus_in_event), NULL);
+ 	g_signal_connect (window, "focus-out-event",
+ 			  G_CALLBACK (nemo_window_focus_out_event), NULL);
+ 
+-- 
+2.43.0
+

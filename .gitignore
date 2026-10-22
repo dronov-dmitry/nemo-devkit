@@ -1,0 +1,18 @@
+# Local clones and build artifacts — never part of this repo
+nemo/
+nemo-src/
+nemo-build/
+nemo-patched-src/
+builddir/
+build/
+*.deb
+*.buildinfo
+*.changes
+
+# Local-only helper (not for publishing)
+01_opencode*
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store

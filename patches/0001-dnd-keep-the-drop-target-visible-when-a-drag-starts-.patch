@@ -1,0 +1,884 @@
+From 144248af9e6bcf3b5733906d560f728c345c6bdd Mon Sep 17 00:00:00 2001
+From: dronov-dmitry <dronov-dmitry@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 11:26:44 +0200
+Subject: [PATCH 1/2] dnd: keep the drop target visible when a drag starts from
+ a window
+
+Clicking a Nemo window that does not have the input focus makes the
+window manager raise and focus it, so starting a drag from a window
+that sat behind another one - a terminal, say - covers the window the
+file is being dropped on for as long as the drag lasts.
+
+Undo that raise from the button press handler of the content views,
+i.e. in the same event dispatch the raise happened in, so it is never
+rendered, and only put the window back in front if the press turns out
+to be a plain click or a selection rectangle rather than a drag.
+
+The window is put back exactly where it was instead of at the bottom of
+the stack, by asking the window manager to restack it below the window
+that used to be above it (_NET_RESTACK_WINDOW); dropping onto one of our
+own folders therefore still works. When the drag ends over some other
+window, the input focus is handed to it, so afterwards this window
+behaves like any other background window and the next click on it
+raises it again.
+
+Whether a click would raise the window is sampled when the pointer
+enters it and when it loses focus.  Crossing events delivered while a
+button is held are ignored: the raise caused by the click produces
+another EnterNotify, already with the focus, which would otherwise wipe
+out the answer just recorded and stop the window from stepping aside at
+all.
+---
+ src/meson.build           |   2 +-
+ src/nemo-icon-view.c      |  87 ++++++
+ src/nemo-list-view.c      |  65 ++++-
+ src/nemo-window-private.h |  25 ++
+ src/nemo-window.c         | 555 ++++++++++++++++++++++++++++++++++++++
+ src/nemo-window.h         |   4 +
+ 6 files changed, 736 insertions(+), 2 deletions(-)
+
+diff --git a/src/meson.build b/src/meson.build
+index 023443e..438f2e1 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -104,7 +104,7 @@ if enableEmptyView
+ endif
+ 
+ nemo_deps = [ cinnamon, gail, glib, gtk, math,
+-  egg, nemo_extension, nemo_private, xapp ]
++  egg, nemo_extension, nemo_private, x11, xapp ]
+ 
+ if exempi_enabled
+   nemo_deps += exempi
+diff --git a/src/nemo-icon-view.c b/src/nemo-icon-view.c
+index a5a0a67..dbf4b4b 100644
+--- a/src/nemo-icon-view.c
++++ b/src/nemo-icon-view.c
+@@ -2399,6 +2399,83 @@ icon_container_activate_filter_cb (NemoIconContainer *container,
+     return nemo_view_activate_filter (NEMO_VIEW (icon_view), (GdkEventKey *) event);
+ }
+ 
++static void
++icon_container_drag_begin_callback (GtkWidget *widget,
++                                    GdkDragContext *context,
++                                    NemoIconView *icon_view)
++{
++    GtkWidget *toplevel;
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_step_aside (NEMO_WINDOW (toplevel));
++    }
++}
++
++static void
++icon_container_drag_end_callback (GtkWidget *widget,
++                                  GdkDragContext *context,
++                                  NemoIconView *icon_view)
++{
++    GtkWidget *toplevel;
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_end (NEMO_WINDOW (toplevel));
++    }
++}
++
++static gboolean
++icon_container_dnd_press_callback (GtkWidget *widget,
++                                   GdkEventButton *event,
++                                   NemoIconView *icon_view)
++{
++    GtkWidget *toplevel;
++
++    if (event->button != 1)
++        return GDK_EVENT_PROPAGATE;
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_press (NEMO_WINDOW (toplevel));
++    }
++
++    return GDK_EVENT_PROPAGATE;
++}
++
++static gboolean
++icon_container_dnd_release_callback (GtkWidget *widget,
++                                     GdkEventButton *event,
++                                     NemoIconView *icon_view)
++{
++    GtkWidget *toplevel;
++
++    if (event->button != 1)
++        return GDK_EVENT_PROPAGATE;
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_release (NEMO_WINDOW (toplevel));
++    }
++
++    return GDK_EVENT_PROPAGATE;
++}
++
++/* Pressing empty space draws a selection rectangle instead of starting a
++ * drag; the raise that the press undid has to be put back, and this signal
++ * is emitted while that same press is still being dispatched. */
++static void
++icon_container_band_select_started_callback (NemoIconContainer *container,
++                                             NemoIconView *icon_view)
++{
++    GtkWidget *toplevel;
++
++    toplevel = gtk_widget_get_toplevel (GTK_WIDGET (container));
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_release (NEMO_WINDOW (toplevel));
++    }
++}
++
+ static NemoIconContainer *
+ create_icon_container (NemoIconView *icon_view)
+ {
+@@ -2470,6 +2547,16 @@ create_icon_container (NemoIconView *icon_view)
+ 				 G_CALLBACK (store_layout_timestamp), icon_view, 0);
+ 	g_signal_connect_object (icon_container, "check-filter-event",
+ 				 G_CALLBACK (icon_container_activate_filter_cb), icon_view, 0);
++	g_signal_connect_object (icon_container, "drag_begin",
++				 G_CALLBACK (icon_container_drag_begin_callback), icon_view, 0);
++	g_signal_connect_object (icon_container, "drag_end",
++				 G_CALLBACK (icon_container_drag_end_callback), icon_view, 0);
++	g_signal_connect_object (icon_container, "button_press_event",
++				 G_CALLBACK (icon_container_dnd_press_callback), icon_view, 0);
++	g_signal_connect_object (icon_container, "button_release_event",
++				 G_CALLBACK (icon_container_dnd_release_callback), icon_view, 0);
++	g_signal_connect_object (icon_container, "band_select_started",
++				 G_CALLBACK (icon_container_band_select_started_callback), icon_view, 0);
+ 
+ 	gtk_container_add (GTK_CONTAINER (icon_view),
+ 			   GTK_WIDGET (icon_container));
+diff --git a/src/nemo-list-view.c b/src/nemo-list-view.c
+index 1411c42..b4aa239 100644
+--- a/src/nemo-list-view.c
++++ b/src/nemo-list-view.c
+@@ -606,9 +606,14 @@ drag_begin_callback (GtkWidget *widget,
+ 		     NemoListView *view)
+ {
+ 	GList *ref_list;
+-
++    GtkWidget *toplevel;
+     cairo_surface_t *surface;
+ 
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_step_aside (NEMO_WINDOW (toplevel));
++    }
++
+     surface = get_drag_surface (view);
+     if (surface) {
+         gtk_drag_set_icon_surface (context, surface);
+@@ -632,7 +637,61 @@ drag_end_callback (GtkWidget *widget,
+              GdkDragContext *context,
+              NemoListView *view)
+ {
++    GtkWidget *toplevel;
++
+     view->details->drag_started = FALSE;
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_end (NEMO_WINDOW (toplevel));
++    }
++}
++
++static gboolean
++list_view_dnd_press_callback (GtkWidget *widget,
++                              GdkEventButton *event,
++                              NemoListView *view)
++{
++    GtkWidget *toplevel;
++    GtkTreePath *path = NULL;
++
++    if (event->button != 1)
++        return GDK_EVENT_PROPAGATE;
++
++    /* Only a press on a row can turn into a drag of that row.  A press on
++     * empty space starts a selection rectangle instead, and the window must
++     * stay where the window manager put it. */
++    gtk_tree_view_get_path_at_pos (GTK_TREE_VIEW (widget),
++                                   event->x, event->y, &path, NULL, NULL, NULL);
++    if (path == NULL)
++        return GDK_EVENT_PROPAGATE;
++
++    gtk_tree_path_free (path);
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_press (NEMO_WINDOW (toplevel));
++    }
++
++    return GDK_EVENT_PROPAGATE;
++}
++
++static gboolean
++list_view_dnd_release_callback (GtkWidget *widget,
++                                GdkEventButton *event,
++                                NemoListView *view)
++{
++    GtkWidget *toplevel;
++
++    if (event->button != 1)
++        return GDK_EVENT_PROPAGATE;
++
++    toplevel = gtk_widget_get_toplevel (widget);
++    if (NEMO_IS_WINDOW (toplevel)) {
++        nemo_window_dnd_source_release (NEMO_WINDOW (toplevel));
++    }
++
++    return GDK_EVENT_PROPAGATE;
+ }
+ 
+ static gboolean
+@@ -2624,6 +2683,10 @@ create_and_set_up_tree_view (NemoListView *view)
+                  G_CALLBACK (drag_begin_callback), view, 0);
+     g_signal_connect_object (view->details->tree_view, "drag-end",
+                  G_CALLBACK (drag_end_callback), view, 0);
++    g_signal_connect_object (view->details->tree_view, "button_press_event",
++                 G_CALLBACK (list_view_dnd_press_callback), view, 0);
++    g_signal_connect_object (view->details->tree_view, "button_release_event",
++                 G_CALLBACK (list_view_dnd_release_callback), view, 0);
+ 	g_signal_connect_object (view->details->tree_view, "drag_data_get",
+ 				 G_CALLBACK (drag_data_get_callback), view, 0);
+ 	g_signal_connect_object (view->details->tree_view, "motion_notify_event",
+diff --git a/src/nemo-window-private.h b/src/nemo-window-private.h
+index 1f43e5f..b3a6ffd 100644
+--- a/src/nemo-window-private.h
++++ b/src/nemo-window-private.h
+@@ -116,6 +116,31 @@ struct NemoWindowDetails
+         gint ignore_meta_sort_direction;
+ 
+         gboolean dynamic_menu_entries_current;
++
++        /* TRUE when a click on this window would raise it, i.e. the window
++         * does not currently have the toplevel focus.  Sampled by the
++         * window's enter-notify/focus-out handlers and consumed by
++         * nemo_window_dnd_step_aside().
++         */
++        gboolean dnd_raised_by_click;
++
++        /* TRUE while the window is sitting lower than it was because a drag
++         * started from it (see nemo_window_dnd_step_aside()).  Consumed by
++         * nemo_window_dnd_source_end().
++         */
++        gboolean dnd_stepped_aside;
++
++        /* TRUE between the press that started the current interaction and
++         * its release / drag end, i.e. a drag may still start from it.
++         */
++        gboolean dnd_drag_started;
++
++        /* XID of the window stacked directly above this one at the moment the
++         * pointer arrived (0 when there was none), i.e. where this window sat
++         * before the click raised it.  Used to put it back exactly there
++         * instead of on the bottom of the stack.  X11 only.
++         */
++        guint64 dnd_stack_sibling;
+ };
+ 
+ /* window geometry */
+diff --git a/src/nemo-window.c b/src/nemo-window.c
+index 81d6e81..6856a0f 100644
+--- a/src/nemo-window.c
++++ b/src/nemo-window.c
+@@ -61,6 +61,10 @@
+ #ifdef HAVE_X11_XF86KEYSYM_H
+ #include <X11/XF86keysym.h>
+ #endif
++#ifdef GDK_WINDOWING_X11
++#include <gdk/gdkx.h>
++#include <X11/Xatom.h>
++#endif
+ #include <libnemo-private/nemo-file-utilities.h>
+ #include <libnemo-private/nemo-file-attributes.h>
+ #include <libnemo-private/nemo-global-preferences.h>
+@@ -947,6 +951,548 @@ nemo_window_is_desktop (NemoWindow *window)
+     return window->details->disable_chrome;
+ }
+ 
++#ifdef GDK_WINDOWING_X11
++/* Positions (bottom to top) of @client and @sibling in
++ * _NET_CLIENT_LIST_STACKING.  Returns FALSE if either is not listed. */
++static gboolean
++nemo_window_stack_positions (Display *xdisplay,
++                             Window   client,
++                             Window   sibling,
++                             long    *client_pos,
++                             long    *sibling_pos)
++{
++    Atom property, actual_type;
++    int actual_format;
++    unsigned long nitems, bytes_after, i;
++    unsigned char *data = NULL;
++    gboolean found_client = FALSE, found_sibling = FALSE;
++
++    *client_pos = -1;
++    *sibling_pos = -1;
++
++    property = XInternAtom (xdisplay, "_NET_CLIENT_LIST_STACKING", True);
++    if (property == None)
++        return FALSE;
++
++    if (XGetWindowProperty (xdisplay, DefaultRootWindow (xdisplay), property,
++                            0, 4096, False, XA_WINDOW, &actual_type,
++                            &actual_format, &nitems, &bytes_after,
++                            &data) != Success)
++        return FALSE;
++
++    if (actual_type != XA_WINDOW || actual_format != 32 || data == NULL) {
++        if (data != NULL)
++            XFree (data);
++        return FALSE;
++    }
++
++    for (i = 0; i < nitems; i++) {
++        Window w = ((Window *) data)[i];
++
++        if (w == client) {
++            *client_pos = (long) i;
++            found_client = TRUE;
++        } else if (w == sibling) {
++            *sibling_pos = (long) i;
++            found_sibling = TRUE;
++        }
++    }
++
++    XFree (data);
++    return found_client && found_sibling;
++}
++
++/* Ask the window manager to put @client back just below @sibling, undoing
++ * the raise that a click made.  Both source indications are sent back to
++ * back: window managers such as Muffin ignore the "application" one and only
++ * honour the "pager" one, others may do the reverse, and the request itself
++ * is idempotent.  Fire and forget - the window manager acts on it
++ * asynchronously, which is why this is cheap enough to run from a button
++ * press handler without ever blocking the click. */
++static void
++nemo_window_send_restack_below (Display *xdisplay,
++                                Window   client,
++                                Window   sibling)
++{
++    XClientMessageEvent cm;
++    int source;
++
++    for (source = 1; source <= 2; source++) {
++        memset (&cm, 0, sizeof (cm));
++        cm.type = ClientMessage;
++        cm.window = client;
++        cm.format = 32;
++        cm.message_type = XInternAtom (xdisplay, "_NET_RESTACK_WINDOW", False);
++        cm.data.l[0] = source;          /* 1 = application, 2 = pager */
++        cm.data.l[1] = (long) sibling;
++        cm.data.l[2] = Below;
++
++        XSendEvent (xdisplay, DefaultRootWindow (xdisplay), False,
++                    SubstructureRedirectMask | SubstructureNotifyMask,
++                    (XEvent *) &cm);
++    }
++    XSync (xdisplay, False);
++}
++
++/* TRUE once @client is really stacked below @sibling, waiting for the window
++ * manager to act if it has not done so yet. */
++static gboolean
++nemo_window_is_below (Display *xdisplay,
++                      Window   client,
++                      Window   sibling)
++{
++    long client_pos, sibling_pos;
++    int attempt;
++
++    for (attempt = 0; attempt < 10; attempt++) {
++        if (nemo_window_stack_positions (xdisplay, client, sibling,
++                                         &client_pos, &sibling_pos) &&
++            client_pos < sibling_pos)
++            return TRUE;
++
++        g_usleep (3000);
++    }
++
++    return FALSE;
++}
++#endif
++
++/* Remember which window was stacked above this one, so that a later
++ * nemo_window_dnd_step_aside() can put it back exactly where it was. */
++static void
++nemo_window_record_stack_sibling (NemoWindow *window)
++{
++#ifdef GDK_WINDOWING_X11
++    GtkWidget *widget = GTK_WIDGET (window);
++    GdkWindow *gdk_window = gtk_widget_get_window (widget);
++    GdkDisplay *display = gtk_widget_get_display (widget);
++    Display *xdisplay;
++    Atom property, actual_type;
++    int actual_format;
++    unsigned long nitems, bytes_after, i;
++    unsigned char *data = NULL;
++    Window client, sibling = None;
++
++    window->details->dnd_stack_sibling = 0;
++
++    if (gdk_window == NULL || !GDK_IS_X11_DISPLAY (display))
++        return;
++
++    xdisplay = GDK_DISPLAY_XDISPLAY (display);
++    client = GDK_WINDOW_XID (gdk_window);
++
++    property = XInternAtom (xdisplay, "_NET_CLIENT_LIST_STACKING", True);
++    if (property == None)
++        return;
++
++    if (XGetWindowProperty (xdisplay, DefaultRootWindow (xdisplay), property,
++                            0, 4096, False, XA_WINDOW, &actual_type,
++                            &actual_format, &nitems, &bytes_after,
++                            &data) != Success)
++        return;
++
++    if (actual_type != XA_WINDOW || actual_format != 32 || data == NULL) {
++        if (data != NULL)
++            XFree (data);
++        return;
++    }
++
++    /* The list runs bottom to top, so the window above ours is the next one. */
++    for (i = 0; i < nitems; i++) {
++        if (((Window *) data)[i] == client) {
++            if (i + 1 < nitems)
++                sibling = ((Window *) data)[i + 1];
++            break;
++        }
++    }
++
++    XFree (data);
++    window->details->dnd_stack_sibling = sibling;
++#endif
++}
++
++static gboolean
++nemo_window_enter_notify_event (GtkWidget *widget,
++				GdkEventCrossing *event)
++{
++	NemoWindow *window = NEMO_WINDOW (widget);
++
++	/* Work out whether a click on this window would raise it: it will if
++	 * the window does not have the toplevel focus.
++	 *
++	 * Two kinds of crossing event have to be ignored, because neither is
++	 * the pointer simply arriving:
++	 *
++	 *  - events delivered while a grab is active (a drag in progress);
++	 *  - events generated while a button is held.  Clicking an unfocused
++	 *    window makes the window manager raise and focus it, and that
++	 *    restack in turn produces another EnterNotify - already with the
++	 *    focus - which would otherwise wipe out the answer we just
++	 *    recorded and stop the window from stepping aside at all.
++	 */
++	if (event->mode != GDK_CROSSING_NORMAL)
++		return GDK_EVENT_PROPAGATE;
++
++	if (event->state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK))
++		return GDK_EVENT_PROPAGATE;
++
++	window->details->dnd_raised_by_click =
++		!gtk_window_has_toplevel_focus (GTK_WINDOW (window));
++
++	if (window->details->dnd_raised_by_click)
++		nemo_window_record_stack_sibling (window);
++
++	return GDK_EVENT_PROPAGATE;
++}
++
++static gboolean
++nemo_window_focus_out_event (GtkWidget *widget,
++			     GdkEventFocus *event)
++{
++	NemoWindow *window = NEMO_WINDOW (widget);
++
++	/* Focus went somewhere else, so the next click on this window is
++	 * intercepted by the window manager and raises it.
++	 */
++	window->details->dnd_raised_by_click = TRUE;
++	nemo_window_record_stack_sibling (window);
++
++	return GDK_EVENT_PROPAGATE;
++}
++
++#ifdef GDK_WINDOWING_X11
++/* The topmost managed client window containing (px, py), or None.
++ *
++ * Looking the target up through the EWMH stacking list rather than with
++ * XQueryPointer() matters here: "drag-end" is emitted while the drag icon
++ * - an override redirect window sitting right under the pointer - is still
++ * around, and XQueryPointer() would happily report that instead of the
++ * window the file was actually dropped on.
++ */
++static Window
++nemo_window_client_under_pointer (Display *xdisplay,
++				  Window  root,
++				  int     px,
++				  int     py)
++{
++	Atom property, actual_type;
++	int actual_format;
++	unsigned long nitems, bytes_after, i;
++	unsigned char *data = NULL;
++	Window result = None;
++
++	property = XInternAtom (xdisplay, "_NET_CLIENT_LIST_STACKING", True);
++	if (property == None)
++		return None;
++
++	if (XGetWindowProperty (xdisplay, root, property, 0, 4096, False,
++				XA_WINDOW, &actual_type, &actual_format,
++				&nitems, &bytes_after, &data) != Success)
++		return None;
++
++	if (actual_type != XA_WINDOW || actual_format != 32 || data == NULL) {
++		if (data != NULL)
++			XFree (data);
++		return None;
++	}
++
++	/* The list is bottom to top, so walk it backwards. */
++	for (i = nitems; i > 0; i--) {
++		Window w = ((Window *) data)[i - 1];
++		Window child;
++		XWindowAttributes attrs;
++		int x, y;
++		int width, height;
++
++		if (!XGetWindowAttributes (xdisplay, w, &attrs))
++			continue;
++		if (attrs.map_state != IsViewable)
++			continue;
++		if (!XTranslateCoordinates (xdisplay, w, root, 0, 0, &x, &y, &child))
++			continue;
++
++		width = attrs.width + 2 * attrs.border_width;
++		height = attrs.height + 2 * attrs.border_width;
++
++		if (px >= x && px < x + width && py >= y && py < y + height) {
++			result = w;
++			break;
++		}
++	}
++
++	XFree (data);
++	return result;
++}
++#endif
++
++/**
++ * nemo_window_dnd_step_aside:
++ * @window: the #NemoWindow a drag was just started from
++ *
++ * Undo the raise that the click starting a drag performed on this window.
++ *
++ * Clicking a window that does not have the input focus makes the window
++ * manager raise and focus it, which covers the window the file is being
++ * dragged to.  Put this window back where it was so that the drop target
++ * stays visible and reachable; nemo_window_dnd_source_end() decides what
++ * happens next once the drag is over.
++ *
++ * Nothing is done when the window already has the toplevel focus: it was
++ * not raised by the click, and lowering it would only hide it.
++ */
++void
++nemo_window_dnd_step_aside (NemoWindow *window)
++{
++	GtkWidget *widget;
++	GdkWindow *gdk_window;
++
++	g_return_if_fail (NEMO_IS_WINDOW (window));
++
++	/* A drag is running now: the matching release must not undo this. */
++	window->details->dnd_drag_started = TRUE;
++
++	if (nemo_window_is_desktop (window))
++		return;
++
++	/* The press already did the work, or there was no raise to undo. */
++	if (!window->details->dnd_raised_by_click)
++		return;
++
++	widget = GTK_WIDGET (window);
++
++	if (!gtk_widget_get_mapped (widget))
++		return;
++
++	gdk_window = gtk_widget_get_window (widget);
++	if (gdk_window == NULL)
++		return;
++
++#ifdef GDK_WINDOWING_X11
++	{
++		GdkDisplay *display = gtk_widget_get_display (widget);
++
++		if (GDK_IS_X11_DISPLAY (display)) {
++			Display *xdisplay = GDK_DISPLAY_XDISPLAY (display);
++			Window sibling = (Window) window->details->dnd_stack_sibling;
++
++			/* Nothing above us, so the click did not cover anything:
++			 * leave the stacking alone. */
++			if (sibling == None)
++				return;
++
++			/* Normally nemo_window_dnd_source_press() has already sent
++			 * this; sending again is harmless and also covers drags
++			 * that did not start with a press we saw.
++			 */
++			nemo_window_send_restack_below (xdisplay,
++							GDK_WINDOW_XID (gdk_window),
++							sibling);
++
++			if (nemo_window_is_below (xdisplay, GDK_WINDOW_XID (gdk_window),
++						  sibling)) {
++				window->details->dnd_stepped_aside = TRUE;
++				return;
++			}
++		}
++	}
++#endif
++
++	/* The window manager could not be asked to put it back in place, so at
++	 * least get out of the way completely.
++	 */
++	gdk_window_lower (gdk_window);
++	window->details->dnd_stepped_aside = TRUE;
++}
++
++/**
++ * nemo_window_dnd_source_press:
++ * @window: the #NemoWindow whose content view has just been clicked
++ *
++ * Called from the button press handler of a content view, before the view
++ * itself looks at the event.
++ *
++ * Clicking a window that does not have the input focus makes the window
++ * manager raise and focus it, which covers the window a file is about to be
++ * dragged to.  Undo the raise straight away, while still inside the same
++ * event dispatch so that it never gets rendered, and only put the window
++ * back in front if the press turns out to be a plain click rather than a
++ * drag (see nemo_window_dnd_source_release()).
++ *
++ * Does nothing when the click did not raise this window.
++ */
++void
++nemo_window_dnd_source_press (NemoWindow *window)
++{
++    GtkWidget *widget;
++    GdkWindow *gdk_window;
++
++    g_return_if_fail (NEMO_IS_WINDOW (window));
++
++    window->details->dnd_drag_started = FALSE;
++    window->details->dnd_stepped_aside = FALSE;
++    if (nemo_window_is_desktop (window))
++        return;
++
++    if (!window->details->dnd_raised_by_click)
++        return;
++
++    widget = GTK_WIDGET (window);
++
++    if (!gtk_widget_get_mapped (widget))
++        return;
++
++    gdk_window = gtk_widget_get_window (widget);
++    if (gdk_window == NULL)
++        return;
++
++#ifdef GDK_WINDOWING_X11
++    {
++        GdkDisplay *display = gtk_widget_get_display (widget);
++
++        if (GDK_IS_X11_DISPLAY (display)) {
++            Window sibling = (Window) window->details->dnd_stack_sibling;
++
++            if (sibling == None)
++                return;
++
++            nemo_window_send_restack_below (GDK_DISPLAY_XDISPLAY (display),
++                                            GDK_WINDOW_XID (gdk_window),
++                                            sibling);
++            window->details->dnd_stepped_aside = TRUE;
++        }
++    }
++#endif
++}
++
++/**
++ * nemo_window_dnd_source_release:
++ * @window: the #NemoWindow whose content view has just been released
++ *
++ * Counterpart of nemo_window_dnd_source_press().  Called both from the
++ * button release handler of a content view and when the view reports that
++ * the press turned into a selection rectangle rather than a drag - in both
++ * cases there is no drag, so the window goes back in front, undoing the
++ * undoing.
++ */
++void
++nemo_window_dnd_source_release (NemoWindow *window)
++{
++    GtkWidget *widget;
++    GdkWindow *gdk_window;
++
++    g_return_if_fail (NEMO_IS_WINDOW (window));
++
++    if (!window->details->dnd_stepped_aside)
++        return;
++
++    /* A drag is what the raise was undone for; leave it alone. */
++    if (window->details->dnd_drag_started)
++        return;
++
++    window->details->dnd_stepped_aside = FALSE;
++
++    if (nemo_window_is_desktop (window))
++        return;
++
++    widget = GTK_WIDGET (window);
++
++    if (!gtk_widget_get_mapped (widget))
++        return;
++
++    gdk_window = gtk_widget_get_window (widget);
++    if (gdk_window == NULL)
++        return;
++
++    gdk_window_raise (gdk_window);
++}
++
++/**
++ * nemo_window_dnd_source_end:
++ * @window: the #NemoWindow a drag that started here has just finished from
++ *
++ * Counterpart of nemo_window_dnd_step_aside().  Does nothing unless the
++ * window was actually lowered for the drag.
++ *
++ * If the drop landed on this window itself (or nowhere at all) the window
++ * is put back where it was, so that rearranging files does not push Nemo
++ * behind everything else.  If the drop landed somewhere else, the window
++ * stays lowered and the input focus is handed to the drop target: that
++ * keeps the target usable straight away, and leaves this window behaving
++ * like any other background window, so the next click on it raises it.
++ */
++void
++nemo_window_dnd_source_end (NemoWindow *window)
++{
++	GtkWidget *widget;
++	GdkWindow *gdk_window;
++
++	g_return_if_fail (NEMO_IS_WINDOW (window));
++
++	if (!window->details->dnd_stepped_aside)
++		return;
++
++	window->details->dnd_stepped_aside = FALSE;
++
++	if (nemo_window_is_desktop (window))
++		return;
++
++	widget = GTK_WIDGET (window);
++	gdk_window = gtk_widget_get_window (widget);
++
++	if (gdk_window == NULL || !gtk_widget_get_mapped (widget))
++		return;
++
++#ifdef GDK_WINDOWING_X11
++	{
++		GdkDisplay *display = gtk_widget_get_display (widget);
++
++		if (GDK_IS_X11_DISPLAY (display)) {
++			Display *xdisplay = GDK_DISPLAY_XDISPLAY (display);
++			Window root, child, target;
++			Window client = GDK_WINDOW_XID (gdk_window);
++			int root_x, root_y, win_x, win_y;
++			unsigned int mask;
++
++			if (XQueryPointer (xdisplay, DefaultRootWindow (xdisplay),
++					   &root, &child,
++					   &root_x, &root_y, &win_x, &win_y, &mask)) {
++				target = nemo_window_client_under_pointer (xdisplay,
++									   root,
++									   root_x,
++									   root_y);
++				if (target == None)
++					target = child;
++
++				if (target != None && target != client) {
++					/* Dropped onto another window: leave ours lowered
++					 * and activate the target through the window
++					 * manager, which also drops our focus.
++					 */
++					GdkWindow *foreign;
++
++					foreign = gdk_x11_window_foreign_new_for_display (display,
++											  target);
++					if (foreign != NULL) {
++						gdk_window_focus (foreign,
++								  gdk_x11_get_server_time (gdk_window));
++						g_object_unref (foreign);
++					}
++					XFlush (xdisplay);
++					return;
++				}
++			}
++
++			/* Dropped on ourselves, or nowhere: undo. */
++			gdk_window_raise (gdk_window);
++			XFlush (xdisplay);
++			return;
++		}
++	}
++#endif
++
++	gdk_window_raise (gdk_window);
++}
++
+ static void
+ nemo_window_save_geometry (NemoWindow *window)
+ {
+@@ -2005,6 +2551,15 @@ nemo_window_init (NemoWindow *window)
+ 	/* Set initial window title */
+ 	gtk_window_set_title (GTK_WINDOW (window), _("Nemo"));
+ 
++	/* Track whether a click on this window would raise it, so that a drag
++	 * started by such a click can put the window back (see
++	 * nemo_window_dnd_step_aside()).
++	 */
++	g_signal_connect (window, "enter-notify-event",
++			  G_CALLBACK (nemo_window_enter_notify_event), NULL);
++	g_signal_connect (window, "focus-out-event",
++			  G_CALLBACK (nemo_window_focus_out_event), NULL);
++
+     g_signal_connect_swapped (nemo_preferences,
+ 				  "changed::" NEMO_PREFERENCES_SHOW_IMAGE_FILE_THUMBNAILS,
+ 				  G_CALLBACK(nemo_window_sync_thumbnail_action),
+diff --git a/src/nemo-window.h b/src/nemo-window.h
+index bb6a4d0..e5a9e35 100644
+--- a/src/nemo-window.h
++++ b/src/nemo-window.h
+@@ -146,6 +146,10 @@ GtkWidget *          nemo_window_ensure_location_bar   (NemoWindow *window);
+ void                 nemo_window_sync_location_widgets (NemoWindow *window);
+ void                 nemo_window_sync_search_widgets   (NemoWindow *window);
+ void                 nemo_window_grab_focus            (NemoWindow *window);
++void                 nemo_window_dnd_step_aside        (NemoWindow *window);
++void                 nemo_window_dnd_source_end        (NemoWindow *window);
++void                 nemo_window_dnd_source_press      (NemoWindow *window);
++void                 nemo_window_dnd_source_release    (NemoWindow *window);
+ void                 nemo_window_sync_create_folder_button (NemoWindow *window);
+ void     nemo_window_hide_sidebar         (NemoWindow *window);
+ void     nemo_window_show_sidebar         (NemoWindow *window);
+-- 
+2.43.0
+

@@ -1,0 +1,1 @@
+sudo apt-get install -y /tmp/opencode/nemo_6.7.6+fix1_amd64.deb /tmp/opencode/nemo-data_6.7.6+fix1_all.deb /tmp/opencode/libnemo-extension1_6.7.6+fix1_amd64.deb /tmp/opencode/libnemo-extension-dev_6.7.6+fix1_amd64.deb /tmp/opencode/gir1.2-nemo-3.0_6.7.6+fix1_amd64.deb /tmp/opencode/nemo-dbg_6.7.6+fix1_amd64.deb && echo INSTALL_OK

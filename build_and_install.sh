@@ -19,18 +19,44 @@ echo "==> Проверка и установка зависимостей..."
 if ! sudo apt-get update -qq; then
 	echo "    предупреждение: apt-get update сообщил об ошибке — продолжаю"
 fi
-sudo apt-get install -y -qq \
-  libgtk-3-dev libglib2.0-dev libxml2-dev libnotify-dev \
-  libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libatk1.0-dev \
-  libdbus-glib-1-dev libx11-dev libxext-dev libxrandr-dev \
-  libexif-dev libjpeg-dev libpng-dev libstartup-notification0-dev \
-  libpolkit-gobject-1-dev libjson-glib-dev \
-  libnemo-extension-dev ccache gettext meson ninja-build \
-  gobject-introspection libgirepository1.0-dev \
-  libcinnamon-desktop-dev libgail-3-dev libxapp-dev libexempi-dev \
-  libgsf-1-dev libtracker-sparql-3.0-dev libselinux1-dev \
-  libgtk-layer-shell-dev libwayland-dev python3-setuptools \
-  || echo "    предупреждение: не удалось доустановить пакеты — продолжаю"
+
+DEPS=(
+	libgtk-3-dev libglib2.0-dev libxml2-dev libnotify-dev
+	libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libatk1.0-dev
+	libdbus-glib-1-dev libx11-dev libxext-dev libxrandr-dev
+	libexif-dev libjpeg-dev libpng-dev libstartup-notification0-dev
+	libpolkit-gobject-1-dev libjson-glib-dev
+	libnemo-extension-dev ccache gettext meson ninja-build
+	gobject-introspection libgirepository1.0-dev
+	libcinnamon-desktop-dev libgail-3-dev libxapp-dev libexempi-dev
+	libgsf-1-dev libtracker-sparql-3.0-dev libselinux1-dev
+	libgtk-layer-shell-dev libwayland-dev python3-setuptools
+)
+APT_FLAGS=()
+
+# libxapp из отключённого Mint-репо (например 2.4.2+elsie) конфликтует с
+# libxapp-dev из Debian — apt падает с "held broken packages". Откатываем
+# libxapp1/gir1.2-xapp-1.0 до версии из активного репозитория.
+# apt-cache madison, а не policy: установленная «+elsie»-версия новее
+# debian-версии, и apt держит её кандидатом — policy дал бы ту же версию.
+XAPP_INST=$(dpkg-query -W -f='${Version}' libxapp1 2>/dev/null || true)
+XAPP_REPO=$(apt-cache madison libxapp1 2>/dev/null | awk -F'|' '{gsub(/ /,"",$2); print $2; exit}')
+if [ -n "$XAPP_INST" ] && [ -n "$XAPP_REPO" ] && [ "$XAPP_INST" != "$XAPP_REPO" ]; then
+	echo "    libxapp1: установлена $XAPP_INST, в репозитории $XAPP_REPO — откатываю"
+	APT_FLAGS+=(--allow-downgrades)
+	DEPS+=(libxapp1="$XAPP_REPO" gir1.2-xapp-1.0="$XAPP_REPO")
+fi
+
+if ! sudo apt-get install -y -qq "${APT_FLAGS[@]}" "${DEPS[@]}"; then
+	echo "    ОШИБКА: не удалось установить зависимости — прерываю." >&2
+	echo "    Попробуйте вручную: sudo apt-get install -y ${DEPS[*]}" >&2
+	exit 1
+fi
+
+if ! command -v meson >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+	echo "    ОШИБКА: meson/ninja не найдены после установки пакетов." >&2
+	exit 1
+fi
 
 # Если локальной копии ещё нет — копируем её с внешнего диска (только если
 # диск в этот момент читается; иначе честно сообщаем, что делать).
@@ -48,19 +74,26 @@ if [ ! -d "$LOCAL_SRC/.git" ]; then
 fi
 
 # Донастройка, если builddir ещё не создан.
+# LDFLAGS вида "-L /path" (с пробелом) ломает meson: он трактует /path как
+# отдельный файл для линковки («library 'm' not found»). Нормализуем.
+export LDFLAGS="${LDFLAGS//-L /-L}"
+
 if [ ! -f "$BUILD_DIR/build.ninja" ]; then
 	echo "==> Настройка meson (локально)..."
 	meson setup "$BUILD_DIR" "$LOCAL_SRC" --prefix=/usr
 fi
 
 echo "==> Сборка (локально)..."
-# g-ir-scanner падает с "No module named 'distutils.msvccompiler'": в ~/.local
-# лежит setuptools 83, у которого этот модуль удалён.  Системный setuptools
-# (68) его содержит, поэтому отключаем user site-packages для сборки.
-PYTHONNOUSERSITE=1 ninja -C "$BUILD_DIR"
+# g-ir-scanner падает с "No module named 'distutils.msvccompiler'": setuptools 83
+# из /usr/local/lib/python3.11/dist-packages подменяет stdlib distutils через
+# .pth (модуль msvccompiler в нём удалён). PYTHONNOUSERSITE не помогает — .pth
+# лежит в системном пути, поэтому откатываем distutils к stdlib.
+export PYTHONNOUSERSITE=1
+export SETUPTOOLS_USE_DISTUTILS=stdlib
+PYTHONNOUSERSITE=1 SETUPTOOLS_USE_DISTUTILS=stdlib ninja -C "$BUILD_DIR"
 
 echo "==> Установка (sudo)..."
-sudo env PYTHONNOUSERSITE=1 ninja -C "$BUILD_DIR" install
+sudo env PYTHONNOUSERSITE=1 SETUPTOOLS_USE_DISTUTILS=stdlib ninja -C "$BUILD_DIR" install
 
 echo "==> Проверка установленного бинарника..."
 echo "    $(nemo --version 2>/dev/null | head -1 || echo 'nemo не запускается')"

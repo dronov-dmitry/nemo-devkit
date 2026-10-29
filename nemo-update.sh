@@ -254,18 +254,44 @@ echo "==> Проверка и установка зависимостей..."
 if ! sudo apt-get update -qq; then
     echo "    предупреждение: apt-get update сообщил об ошибке — продолжаю"
 fi
-sudo apt-get install -y -qq \
-    libgtk-3-dev libglib2.0-dev libxml2-dev libnotify-dev \
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libatk1.0-dev \
-    libdbus-glib-1-dev libx11-dev libxext-dev libxrandr-dev \
-    libexif-dev libjpeg-dev libpng-dev libstartup-notification0-dev \
-    libpolkit-gobject-1-dev libjson-glib-dev \
-    libnemo-extension-dev ccache gettext meson ninja-build \
-    gobject-introspection libgirepository1.0-dev \
-    libcinnamon-desktop-dev libgail-3-dev libxapp-dev libexempi-dev \
-    libgsf-1-dev libtracker-sparql-3.0-dev libselinux1-dev \
-    libgtk-layer-shell-dev libwayland-dev python3-setuptools \
-    || echo "    предупреждение: не удалось доустановить пакеты — продолжаю"
+
+DEPS=(
+    libgtk-3-dev libglib2.0-dev libxml2-dev libnotify-dev
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev libatk1.0-dev
+    libdbus-glib-1-dev libx11-dev libxext-dev libxrandr-dev
+    libexif-dev libjpeg-dev libpng-dev libstartup-notification0-dev
+    libpolkit-gobject-1-dev libjson-glib-dev
+    libnemo-extension-dev ccache gettext meson ninja-build
+    gobject-introspection libgirepository1.0-dev
+    libcinnamon-desktop-dev libgail-3-dev libxapp-dev libexempi-dev
+    libgsf-1-dev libtracker-sparql-3.0-dev libselinux1-dev
+    libgtk-layer-shell-dev libwayland-dev python3-setuptools
+)
+APT_FLAGS=()
+
+# libxapp из отключённого Mint-репо (например 2.4.2+elsie) конфликтует с
+# libxapp-dev из Debian — apt падает с "held broken packages". Откатываем
+# libxapp1/gir1.2-xapp-1.0 до версии из активного репозитория.
+# apt-cache madison, а не policy: установленная «+elsie»-версия новее
+# debian-версии, и apt держит её кандидатом — policy дал бы ту же версию.
+XAPP_INST=$(dpkg-query -W -f='${Version}' libxapp1 2>/dev/null || true)
+XAPP_REPO=$(apt-cache madison libxapp1 2>/dev/null | awk -F'|' '{gsub(/ /,"",$2); print $2; exit}')
+if [ -n "$XAPP_INST" ] && [ -n "$XAPP_REPO" ] && [ "$XAPP_INST" != "$XAPP_REPO" ]; then
+    echo "    libxapp1: установлена $XAPP_INST, в репозитории $XAPP_REPO — откатываю"
+    APT_FLAGS+=(--allow-downgrades)
+    DEPS+=(libxapp1="$XAPP_REPO" gir1.2-xapp-1.0="$XAPP_REPO")
+fi
+
+if ! sudo apt-get install -y -qq "${APT_FLAGS[@]}" "${DEPS[@]}"; then
+    echo "    ОШИБКА: не удалось установить зависимости — прерываю." >&2
+    echo "    Попробуйте вручную: sudo apt-get install -y ${DEPS[*]}" >&2
+    exit 1
+fi
+
+if ! command -v meson >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+    echo "    ОШИБКА: meson/ninja не найдены после установки пакетов." >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Сборка
